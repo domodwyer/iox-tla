@@ -76,8 +76,8 @@ Next ==
 
 Spec == Init /\ [][Next]_vars /\ WF_<<vars>>(Next)
 
-TypeOk == /\ DOMAIN p_state = Peers 
-    /\ \A p \in Peers: p_state[p] \subseteq Schemas
+TypeOk == 
+    /\ p_state \in [Peers -> SUBSET Schemas]
     /\ gossip_queue \subseteq (Peers \X Schemas)
     /\ event_count \in 0..MaxEvents
 
