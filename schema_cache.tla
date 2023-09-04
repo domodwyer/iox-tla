@@ -26,6 +26,8 @@ VARIABLES
     \* the gossip message, and "schema" is the gossiped schema to apply.
     gossip_queue
 
+vars == << p_state, gossip_queue, event_count >>
+
 \* Helper operator for all possible schema combinations
 Schemas == Namespaces \X Tables \X Columns
 
@@ -70,9 +72,8 @@ Next ==
     \/ \E p \in Peers: 
         \/ UpsertSchema(p) 
         \/ GossipRx(p)
-    \/ UNCHANGED << p_state, gossip_queue, event_count >>
+    \/ UNCHANGED vars
 
-vars == << p_state, gossip_queue, event_count >>
 Spec == Init /\ [][Next]_vars /\ WF_<<vars>>(Next)
 
 TypeOk == /\ DOMAIN p_state = Peers 
