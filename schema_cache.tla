@@ -21,12 +21,14 @@ VARIABLES
     event_count, 
     \* A function of Peers to schema sets modelling the peer's local cache
     \* state.
-    p_state, 
+    p_state,
     \* Set of tuples "<< P, schema >>" where "P" is the peer which should apply
     \* the gossip message, and "schema" is the gossiped schema to apply.
-    gossip_queue
+    gossip_set
 
-vars == << p_state, gossip_queue, event_count >>
+Gossip == INSTANCE Gossip
+
+vars == << p_state, event_count, gossip_set >>
 
 \* Helper operator for all possible schema combinations
 Schemas == Namespaces \X Tables \X Columns
@@ -42,50 +44,41 @@ UpsertSchema(p) ==
     /\ event_count' = event_count + 1
     /\ \E s \in {v \in Schemas: v \notin p_state[p]}: \* No duplicate upserts 
         /\ CacheMerge(p, {s})
-        /\ \A q \in Peers \ {p}: gossip_queue' = gossip_queue \union {<<q, s>>}
+        /\ Gossip!Broadcast(p, s)
 
 \* Peer "p" receives a previously gossiped schema.
-GossipRx(p) == \E msg \in {v \in gossip_queue: v[1] = p}:
-    /\ CacheMerge(p, {msg[2]})
-    /\ gossip_queue' = gossip_queue \ {msg}
-    /\ UNCHANGED <<event_count>>
+GossipRx(p, msg) == CacheMerge(p, {msg})
 
 \* Perform a sync round, pulling all missing schemas from p into q.
 SyncPull(p, q) == LET diff == p_state[p] \ p_state[q] IN 
     /\ diff # {}
     /\ CacheMerge(q, diff)
-    /\ UNCHANGED <<event_count, gossip_queue>>
-
-\* Drop a random gossip message in the gossip_queue.
-GossipDrop == \E v \in gossip_queue: 
-    /\ gossip_queue' = gossip_queue \ {v} 
-    /\ UNCHANGED <<p_state, event_count>>
+    /\ UNCHANGED << event_count, gossip_set >>
 
 Init == 
     /\ p_state = [p \in Peers |-> {}]
-    /\ gossip_queue = {}
     /\ event_count = 0
+    /\ Gossip!Init
 
 Next == 
-    \/ GossipDrop
+    \/ Gossip!Drop /\ UNCHANGED << p_state, event_count >>
+    \/ Gossip!Rx(GossipRx) /\ UNCHANGED << event_count >>
     \/ \E p, q \in Peers: SyncPull(p, q)
-    \/ \E p \in Peers: 
-        \/ UpsertSchema(p) 
-        \/ GossipRx(p)
+    \/ \E p \in Peers: UpsertSchema(p) 
     \/ UNCHANGED vars
 
 Spec == Init /\ [][Next]_vars /\ WF_<<vars>>(Next)
 
 TypeOk == 
     /\ p_state \in [Peers -> SUBSET Schemas]
-    /\ gossip_queue \subseteq (Peers \X Schemas)
     /\ event_count \in 0..MaxEvents
+    /\ Gossip!TypeOk(Schemas)
 
 ----------------------------------------------------------------------------
 (*************************** Temporal Properties ***************************)
 
 \* Eventually all gossip messages are applied or dropped.
-EventuallyAllGossipApplied == <>[](gossip_queue = {})
+EventuallyAllGossipApplied == Gossip!EventuallyAllGossipApplied
 
 \* Eventually all peers are consistent (eventual cache consistency).
 EventuallyConsistent == <>[](\A p, q \in Peers: p_state[p] = p_state[q])
