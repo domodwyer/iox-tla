@@ -79,8 +79,8 @@ CONSTANTS
     Threads, 
     \* A model bound on the number of upstream errors observed.
     MaxErrors,
-    \* A model bound on the number of probe resets that occur.
-    MaxProbeResets,
+    \* A model bound on the number of probe windows that occur.
+    MaxProbeWindows,
     \* A model bound on the number of request result counter resets that occur.
     MaxCounterResets,
     \* Number of probe requests to send per probe window.
@@ -95,18 +95,18 @@ VARIABLES
     threads,
     counts,
     probes_started,
-    probe_resets,
+    probe_windows,
     counter_resets
 
 vars == << 
     threads, 
     counts,
     probes_started,
-    probe_resets,
+    probe_windows,
     counter_resets
 >>
 
-vars_probes == << probes_started, probe_resets >>
+vars_probes == << probes_started, probe_windows >>
 vars_counts == << counts, counter_resets >>
 
 SetThread(t, state) == threads' = [threads EXCEPT ![t] = state]
@@ -131,8 +131,8 @@ Counter_IsHealthy_Check == ~Counter_IsProbing /\ Counter_IsHealthy
 \* The start of a new probing window, during which time a limited number of
 \* probes are allowed.
 ProbeStart(t) == 
-    /\ probe_resets < MaxProbeResets
-    /\ probe_resets' = probe_resets + 1
+    /\ probe_windows < MaxProbeWindows
+    /\ probe_windows' = probe_windows + 1
     /\ probes_started' = 1
     /\ SetCounts(0, 0)
     /\ SetThread(t, T_MakeRequest)
@@ -177,7 +177,7 @@ ThreadShouldProbe_health(t) ==
 ThreadShouldProbe_probe(t) == 
     /\ GetThread(t) = T_ReadProbe_probe
     /\ \/ ProbeStart(t) /\ UNCHANGED << counter_resets >>
-       \/ ProbeContinue(t) /\ UNCHANGED << vars_counts, probe_resets >>
+       \/ ProbeContinue(t) /\ UNCHANGED << vars_counts, probe_windows >>
        \/ ProbeExhausted(t) /\ UNCHANGED << vars_counts, vars_probes >>
 
 \* The thread makes a request to the upstream and records the result.
@@ -204,7 +204,7 @@ Init ==
     /\ threads = [n \in Threads |-> T_ReadHealth]
     /\ counts = [ok |-> 0, err |-> 0]
     /\ probes_started = 0
-    /\ probe_resets = 0
+    /\ probe_windows = 0
     /\ counter_resets = 0
 
 Next == 
@@ -232,7 +232,7 @@ TypeOk ==
        }]
     /\ counts \in [ok: 0..MaxOk, err: 0..MaxErrors]
     /\ probes_started \in 0..NumProbes
-    /\ probe_resets \in 0..MaxProbeResets
+    /\ probe_windows \in 0..MaxProbeWindows
     /\ counter_resets \in 0..MaxCounterResets
 
 ----------------------------------------------------------------------------
@@ -245,8 +245,8 @@ ExclusiveProbeState == \A t \in Threads:
 \* Eventually the circuit breaker is always "healthy", within the bounds of the
 \* model.
 EventuallyAlwaysHealthy == <>[](
-    \/ Counter_IsHealthy_Check       \* The circuit becomes healthy
-    \/ probe_resets = MaxProbeResets \* Or the model deadlocks at state bounds
+    \/ Counter_IsHealthy_Check         \* The circuit becomes healthy
+    \/ probe_windows = MaxProbeWindows \* Or the model deadlocks at state bounds
 )
 
 =============================================================================
