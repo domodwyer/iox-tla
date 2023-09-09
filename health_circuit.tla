@@ -15,11 +15,11 @@ ensures a circuit can become unhealthy without having to observe a large number
 of errors to overcome a large number of previously successful requests (or vice 
 versa).
 
-This model validates that the circuit always eventually becomes healthy
-(allowing requests) given a bounded number of upstream outages, and does not
-deadlock or become "stuck" in an unhealthy state.
+This model validates liveness of the circuit, ensuring it always eventually 
+becomes healthy (allowing requests) given a bounded number of upstream errors, 
+and does not deadlock or become "stuck" in an unhealthy state.
 
-The per-thread atomic states, advancing independently an concurrently, are 
+The per-thread atomic states, advancing independently and concurrently, are  
 modelled as below:
 
      
@@ -65,10 +65,10 @@ modelled as below:
                               Record Result
      
 
-For the purposes of this model, all requests to a healthy upstream succeed. The 
-number of probe windows are bounded to limit the state space of the model, and 
-only behaviours that do not reach the bound are validated as having a circuit 
-that eventually becomes healthy.
+The number of probe windows, counter resets, and number of requests (before a 
+reset, if available) are bounded to limit the state space of the model. Only 
+behaviours that do not reach the probe window bound are validated as having a 
+circuit that eventually becomes healthy.
 
 --------------------------- MODULE health_circuit --------------------------
 
@@ -77,11 +77,13 @@ EXTENDS TLC, Integers
 CONSTANTS 
     \* The set of threads concurrently interacting with the circuit breaker.
     Threads, 
-    \* A model bound on the number of upstream outages.
-    MaxOutages,
+    \* A model bound on the number of upstream errors observed.
+    MaxErrors,
     \* A model bound on the number of probe resets that occur.
     MaxProbeResets,
-    \* Number of probe requests to send
+    \* A model bound on the number of request result counter resets that occur.
+    MaxCounterResets,
+    \* Number of probe requests to send per probe window.
     NumProbes,
     \* Thread states
     T_ReadHealth,       \* Start of request - next read the circuit health
@@ -91,23 +93,21 @@ CONSTANTS
 
 VARIABLES 
     threads,
-    outage_count, 
-    upstream_healthy,
     counts,
     probes_started,
-    probe_resets
+    probe_resets,
+    counter_resets
 
 vars == << 
-    threads,
-    outage_count, 
-    upstream_healthy,
+    threads, 
     counts,
     probes_started,
-    probe_resets
+    probe_resets,
+    counter_resets
 >>
 
-vars_upstream == << outage_count, upstream_healthy >>
 vars_probes == << probes_started, probe_resets >>
+vars_counts == << counts, counter_resets >>
 
 SetThread(t, state) == threads' = [threads EXCEPT ![t] = state]
 GetThread(t) == threads[t]
@@ -116,6 +116,8 @@ SetCounts(ok, err) == counts' = [ok |-> ok, err |-> err]
 SetRequestOk == counts' = [counts EXCEPT !.ok = @ + 1]
 SetRequestErr == counts' = [counts EXCEPT !.err = @ + 1]
 RequestTotal == counts.ok + counts.err
+\* Bound the model to the minimum number of successful requests to drive healthy
+MaxOk == MaxErrors + NumProbes
 
 \* Counter states that are derived from the request counts.
 Counter_IsProbing == RequestTotal < NumProbes
@@ -125,20 +127,6 @@ Counter_IsHealthy == counts.ok > (counts.err + 1)
 Counter_IsHealthy_Check == ~Counter_IsProbing /\ Counter_IsHealthy
 
 ----------------------------------------------------------------------------
-
-\* The upstream goes offline.
-UpstreamGoesOffline == 
-    /\ upstream_healthy = TRUE
-    /\ outage_count < MaxOutages
-    /\ upstream_healthy' = FALSE
-    /\ outage_count' = outage_count + 1
-    /\ UNCHANGED << threads, counts, vars_probes >>
-
-\* The upstream recovers.
-UpstreamGoesOnline == 
-    /\ ~upstream_healthy
-    /\ upstream_healthy' = TRUE
-    /\ UNCHANGED << threads, outage_count, counts, vars_probes >>
 
 \* The start of a new probing window, during which time a limited number of
 \* probes are allowed.
@@ -166,10 +154,9 @@ ProbeExhausted(t) ==
 \* else evaluate the probing state.
 ThreadReadHealth(t) ==
     /\ GetThread(t) = T_ReadHealth
-    /\ SetThread(t, T_ReadProbe_health)
     /\ \/ Counter_IsHealthy_Check = TRUE  /\ SetThread(t, T_MakeRequest) \* Fast "healthy" path
        \/ Counter_IsHealthy_Check = FALSE /\ SetThread(t, T_ReadProbe_health)
-    /\ UNCHANGED << vars_upstream, counts, vars_probes >>
+    /\ UNCHANGED << vars_counts, vars_probes >>
 
 \* The upstream was believed to be unhealthy when evaluating above (but both the
 \* upstream and the circuit may no longer be unhealthy).
@@ -180,49 +167,47 @@ ThreadReadHealth(t) ==
 \* If the circuit is unhealthy, read the probe state.
 ThreadShouldProbe_health(t) == 
     /\ GetThread(t) = T_ReadProbe_health
-    /\ SetThread(t, T_ReadProbe_probe)
     /\ \/ Counter_IsHealthy_Check = TRUE  /\ SetThread(t, T_ReadHealth) \* Abort
        \/ Counter_IsHealthy_Check = FALSE /\ SetThread(t, T_ReadProbe_probe)
-    /\ UNCHANGED << vars_upstream, counts, vars_probes >>
+    /\ UNCHANGED << vars_counts, vars_probes >>
 
 \* Read the probe state.
 \*
 \* A request will either be allowed through, or aborted.
 ThreadShouldProbe_probe(t) == 
     /\ GetThread(t) = T_ReadProbe_probe
-    /\ \/ ProbeStart(t) /\ UNCHANGED vars_upstream
-       \/ ProbeContinue(t) /\ UNCHANGED << vars_upstream, counts, probe_resets >>
-       \/ ProbeExhausted(t) /\ UNCHANGED << vars_upstream, counts, vars_probes >>
+    /\ \/ ProbeStart(t) /\ UNCHANGED << counter_resets >>
+       \/ ProbeContinue(t) /\ UNCHANGED << vars_counts, probe_resets >>
+       \/ ProbeExhausted(t) /\ UNCHANGED << vars_counts, vars_probes >>
 
 \* The thread makes a request to the upstream and records the result.
 ThreadMakeRequest(t) ==
     /\ GetThread(t) = T_MakeRequest
     /\ SetThread(t, T_ReadHealth)
-    /\ \/ upstream_healthy = TRUE  /\ SetRequestOk
-       \/ upstream_healthy = FALSE /\ SetRequestErr
-    /\ UNCHANGED << vars_upstream, vars_probes >>
+    /\ \/ counts.ok < MaxOk /\ SetRequestOk
+       \/ counts.err < MaxErrors /\ SetRequestErr
+    /\ UNCHANGED << vars_probes, counter_resets >>
 
 \* Periodically request result counters are reset to ensure the circuit breaker
 \* doesn't have to observe large numbers of errors to become unhealthy, after
 \* having previously observed large numbers of successful requests (or vice
 \* versa).
 ResetCounters == 
+    /\ counter_resets < MaxCounterResets
+    /\ counter_resets' = counter_resets + 1
     /\ Counter_IsHealthy
     /\ ~Counter_IsProbing
     /\ SetCounts(NumProbes, 0)
-    /\ UNCHANGED << vars_upstream, vars_probes, threads >>
+    /\ UNCHANGED << vars_probes, threads >>
 
 Init == 
     /\ threads = [n \in Threads |-> T_ReadHealth]
-    /\ upstream_healthy \in BOOLEAN
-    /\ outage_count = 0
     /\ counts = [ok |-> 0, err |-> 0]
     /\ probes_started = 0
     /\ probe_resets = 0
+    /\ counter_resets = 0
 
 Next == 
-    \/ UpstreamGoesOffline
-    \/ UpstreamGoesOnline
     \/ ResetCounters
     \/ \E t \in Threads:
         \/ ThreadReadHealth(t)
@@ -234,10 +219,8 @@ Next ==
 Spec == 
     /\ Init 
     /\ [][Next]_vars 
-    /\ \E t \in Threads: 
-        /\ WF_vars(ThreadReadHealth(t))
-        /\ WF_vars(ThreadShouldProbe_health(t))
-        /\ WF_vars(ThreadMakeRequest(t))
+    /\ \A t \in Threads: 
+        /\ WF_vars(Next)
         /\ SF_vars(ThreadShouldProbe_probe(t) /\ ProbeStart(t))
 
 TypeOk == 
@@ -247,11 +230,10 @@ TypeOk ==
             T_ReadProbe_health, 
             T_ReadProbe_probe
        }]
-    /\ outage_count \in 0..MaxOutages
-    /\ upstream_healthy \in BOOLEAN
-    /\ counts \in [ok: Int, err: Int]
+    /\ counts \in [ok: 0..MaxOk, err: 0..MaxErrors]
     /\ probes_started \in 0..NumProbes
     /\ probe_resets \in 0..MaxProbeResets
+    /\ counter_resets \in 0..MaxCounterResets
 
 ----------------------------------------------------------------------------
 
@@ -263,8 +245,8 @@ ExclusiveProbeState == \A t \in Threads:
 \* Eventually the circuit breaker is always "healthy", within the bounds of the
 \* model.
 EventuallyAlwaysHealthy == <>[](
-    \/ Counter_IsHealthy_Check       \* Terminates in a healthy state, or
-    \/ probe_resets = MaxProbeResets \* Reaches model bounds in any state
+    \/ Counter_IsHealthy_Check       \* The circuit becomes healthy
+    \/ probe_resets = MaxProbeResets \* Or the model deadlocks at state bounds
 )
 
 =============================================================================
