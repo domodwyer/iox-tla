@@ -16,9 +16,9 @@ EXTENDS TLC, Integers
 
 CONSTANTS Namespaces, Tables, Columns, Peers, MaxEvents
 
-VARIABLES 
+VARIABLES
     \* A state bound restricting the number of schemas applied to the system.
-    event_count, 
+    event_count,
     \* A function of Peers to schema sets modelling the peer's local cache
     \* state.
     p_state,
@@ -39,10 +39,10 @@ CacheMerge(p, s) == p_state' = [p_state EXCEPT ![p] = @ \union s]
 ----------------------------------------------------------------------------
 
 \* Upsert a schema to a peer and place the new addition in the gossip queue.
-UpsertSchema(p) == 
+UpsertSchema(p) ==
     /\ event_count < MaxEvents \* Limit state space
     /\ event_count' = event_count + 1
-    /\ \E s \in {v \in Schemas: v \notin p_state[p]}: \* No duplicate upserts 
+    /\ \E s \in {v \in Schemas: v \notin p_state[p]}: \* No duplicate upserts
         /\ CacheMerge(p, {s})
         /\ Gossip!Broadcast(p, s)
 
@@ -50,26 +50,26 @@ UpsertSchema(p) ==
 GossipRx(p, msg) == CacheMerge(p, {msg})
 
 \* Perform a sync round, pulling all missing schemas from p into q.
-SyncPull(p, q) == LET diff == p_state[p] \ p_state[q] IN 
+SyncPull(p, q) == LET diff == p_state[p] \ p_state[q] IN
     /\ diff # {}
     /\ CacheMerge(q, diff)
     /\ UNCHANGED << event_count, gossip_set >>
 
-Init == 
+Init ==
     /\ p_state = [p \in Peers |-> {}]
     /\ event_count = 0
     /\ Gossip!Init
 
-Next == 
+Next ==
     \/ Gossip!Drop /\ UNCHANGED << p_state, event_count >>
     \/ Gossip!Rx(GossipRx) /\ UNCHANGED << event_count >>
     \/ \E p, q \in Peers: SyncPull(p, q)
-    \/ \E p \in Peers: UpsertSchema(p) 
+    \/ \E p \in Peers: UpsertSchema(p)
     \/ UNCHANGED vars
 
 Spec == Init /\ [][Next]_vars /\ WF_<<vars>>(Next)
 
-TypeOk == 
+TypeOk ==
     /\ p_state \in [Peers -> SUBSET Schemas]
     /\ event_count \in 0..MaxEvents
     /\ Gossip!TypeOk(Schemas)
